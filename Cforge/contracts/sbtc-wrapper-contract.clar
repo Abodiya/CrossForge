@@ -1,475 +1,441 @@
-;; sBTC Cross-Chain Wrapper Contract
-;; Features: Time-locked deposits, Multi-sig unwrapping, Yield generation
+;; Liquid Gold Vault - Precious Metals Tokenization Platform
+;; Features: Secure Vaults, Multi-Guardian Redemption, Premium Staking Rewards
 
 ;; Constants
-(define-constant CONTRACT_OWNER tx-sender)
-(define-constant ERR_UNAUTHORIZED (err u401))
-(define-constant ERR_INVALID_AMOUNT (err u402))
-(define-constant ERR_INSUFFICIENT_BALANCE (err u403))
-(define-constant ERR_TIME_LOCK_ACTIVE (err u404))
-(define-constant ERR_INVALID_SIGNATURE (err u405))
-(define-constant ERR_ALREADY_SIGNED (err u406))
-(define-constant ERR_INSUFFICIENT_SIGNATURES (err u407))
-(define-constant ERR_DEPOSIT_NOT_FOUND (err u408))
-(define-constant ERR_INVALID_YIELD_RATE (err u409))
-(define-constant ERR_YIELD_ALREADY_CLAIMED (err u410))
+(define-constant VAULT_MASTER tx-sender)
+(define-constant ERR_ACCESS_DENIED (err u501))
+(define-constant ERR_INVALID_QUANTITY (err u502))
+(define-constant ERR_INSUFFICIENT_HOLDINGS (err u503))
+(define-constant ERR_VAULT_SEALED (err u504))
+(define-constant ERR_INVALID_GUARDIAN (err u505))
+(define-constant ERR_DUPLICATE_APPROVAL (err u506))
+(define-constant ERR_INSUFFICIENT_APPROVALS (err u507))
+(define-constant ERR_VAULT_NOT_FOUND (err u508))
+(define-constant ERR_INVALID_PREMIUM_RATE (err u509))
+(define-constant ERR_REWARDS_ALREADY_HARVESTED (err u510))
 
 ;; Data Variables
-(define-data-var total-wrapped-btc uint u0)
-(define-data-var base-yield-rate uint u500) ;; 5% annual yield (500 basis points)
-(define-data-var contract-paused bool false)
-(define-data-var required-signatures uint u2) ;; Default 2-of-3 multisig
+(define-data-var total-tokenized-gold uint u0)
+(define-data-var premium-staking-rate uint u750) ;; 7.5% annual premium rate
+(define-data-var system-active bool true)
+(define-data-var minimum-guardian-approvals uint u3) ;; Default 3-of-5 multi-guardian
 
 ;; Data Maps
-(define-map user-balances principal uint)
-(define-map time-locked-deposits 
+(define-map investor-portfolios principal uint)
+(define-map secured-treasure-vaults 
   uint 
   {
-    owner: principal,
-    amount: uint,
-    unlock-height: uint,
-    created-at: uint,
-    yield-claimed: bool
+    vault-keeper: principal,
+    gold-quantity: uint,
+    release-block: uint,
+    vault-created: uint,
+    premium-harvested: bool
   }
 )
 
-(define-map multisig-unwrap-requests
+(define-map guardian-redemption-orders
   uint
   {
-    requester: principal,
-    amount: uint,
-    btc-address: (string-ascii 64),
-    signatures: (list 10 principal),
-    signature-count: uint,
-    executed: bool,
-    created-at: uint
+    order-creator: principal,
+    redemption-amount: uint,
+    delivery-address: (string-ascii 128),
+    guardian-approvals: (list 15 principal),
+    approval-tally: uint,
+    order-fulfilled: bool,
+    order-timestamp: uint
   }
 )
 
-(define-map authorized-signers principal bool)
-(define-map user-yield-info
+(define-map certified-guardians principal bool)
+(define-map investor-premium-tracking
   principal
   {
-    last-claim-height: uint,
-    total-earned: uint,
-    pending-yield: uint
+    last-harvest-block: uint,
+    lifetime-earnings: uint,
+    accumulated-rewards: uint
   }
 )
 
 ;; Counters
-(define-data-var deposit-counter uint u0)
-(define-data-var unwrap-request-counter uint u0)
+(define-data-var vault-sequence uint u0)
+(define-data-var redemption-sequence uint u0)
 
 ;; Authorization Functions
-(define-private (is-contract-owner)
-  (is-eq tx-sender CONTRACT_OWNER)
+(define-private (is-vault-master)
+  (is-eq tx-sender VAULT_MASTER)
 )
 
-(define-private (is-authorized-signer (signer principal))
-  (default-to false (map-get? authorized-signers signer))
+(define-private (is-certified-guardian (guardian principal))
+  (default-to false (map-get? certified-guardians guardian))
 )
 
-;; Admin Functions
-(define-public (add-authorized-signer (signer principal))
+;; Administrative Functions
+(define-public (certify-guardian (new-guardian principal))
   (begin
-    (asserts! (is-contract-owner) ERR_UNAUTHORIZED)
-    (ok (map-set authorized-signers signer true))
+    (asserts! (is-vault-master) ERR_ACCESS_DENIED)
+    (ok (map-set certified-guardians new-guardian true))
   )
 )
 
-(define-public (remove-authorized-signer (signer principal))
+(define-public (revoke-guardian-certification (guardian principal))
   (begin
-    (asserts! (is-contract-owner) ERR_UNAUTHORIZED)
-    (ok (map-delete authorized-signers signer))
+    (asserts! (is-vault-master) ERR_ACCESS_DENIED)
+    (ok (map-delete certified-guardians guardian))
   )
 )
 
-(define-public (set-required-signatures (new-requirement uint))
+(define-public (adjust-guardian-threshold (new-threshold uint))
   (begin
-    (asserts! (is-contract-owner) ERR_UNAUTHORIZED)
-    (asserts! (and (> new-requirement u0) (<= new-requirement u10)) ERR_INVALID_AMOUNT)
-    (ok (var-set required-signatures new-requirement))
+    (asserts! (is-vault-master) ERR_ACCESS_DENIED)
+    (asserts! (and (> new-threshold u0) (<= new-threshold u15)) ERR_INVALID_QUANTITY)
+    (ok (var-set minimum-guardian-approvals new-threshold))
   )
 )
 
-(define-public (set-yield-rate (new-rate uint))
+(define-public (update-premium-staking-rate (new-premium-rate uint))
   (begin
-    (asserts! (is-contract-owner) ERR_UNAUTHORIZED)
-    (asserts! (<= new-rate u2000) ERR_INVALID_YIELD_RATE) ;; Max 20% yield
-    (ok (var-set base-yield-rate new-rate))
+    (asserts! (is-vault-master) ERR_ACCESS_DENIED)
+    (asserts! (<= new-premium-rate u3000) ERR_INVALID_PREMIUM_RATE) ;; Max 30% premium
+    (ok (var-set premium-staking-rate new-premium-rate))
   )
 )
 
-(define-public (toggle-contract-pause)
+(define-public (toggle-system-status)
   (begin
-    (asserts! (is-contract-owner) ERR_UNAUTHORIZED)
-    (ok (var-set contract-paused (not (var-get contract-paused))))
+    (asserts! (is-vault-master) ERR_ACCESS_DENIED)
+    (ok (var-set system-active (not (var-get system-active))))
   )
 )
 
-;; Core Wrapping Functions
-(define-public (wrap-bitcoin (amount uint) (btc-txid (string-ascii 64)))
+;; Core Tokenization Functions
+(define-public (mint-liquid-gold (quantity uint) (metal-certificate (string-ascii 96)))
   (let (
-    (current-balance (default-to u0 (map-get? user-balances tx-sender)))
+    (current-portfolio (default-to u0 (map-get? investor-portfolios tx-sender)))
   )
-    (asserts! (not (var-get contract-paused)) ERR_UNAUTHORIZED)
-    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (var-get system-active) ERR_ACCESS_DENIED)
+    (asserts! (> quantity u0) ERR_INVALID_QUANTITY)
     
-    ;; Update user balance
-    (map-set user-balances tx-sender (+ current-balance amount))
+    ;; Update investor portfolio
+    (map-set investor-portfolios tx-sender (+ current-portfolio quantity))
     
-    ;; Update total wrapped BTC
-    (var-set total-wrapped-btc (+ (var-get total-wrapped-btc) amount))
+    ;; Update total tokenized gold
+    (var-set total-tokenized-gold (+ (var-get total-tokenized-gold) quantity))
     
-    ;; Initialize yield tracking
-    (map-set user-yield-info tx-sender {
-      last-claim-height: block-height,
-      total-earned: u0,
-      pending-yield: u0
+    ;; Initialize premium tracking
+    (map-set investor-premium-tracking tx-sender {
+      last-harvest-block: block-height,
+      lifetime-earnings: u0,
+      accumulated-rewards: u0
     })
     
     (print {
-      action: "wrap-bitcoin",
-      user: tx-sender,
-      amount: amount,
-      btc-txid: btc-txid,
-      new-balance: (+ current-balance amount)
+      event: "mint-liquid-gold",
+      investor: tx-sender,
+      quantity: quantity,
+      certificate: metal-certificate,
+      new-portfolio-balance: (+ current-portfolio quantity)
     })
     
-    (ok amount)
+    (ok quantity)
   )
 )
 
-;; Time-Locked Deposit Functions
-(define-public (create-time-locked-deposit (amount uint) (lock-duration uint))
+;; Secured Treasure Vault Functions
+(define-public (seal-treasure-vault (gold-amount uint) (lock-duration uint))
   (let (
-    (current-balance (default-to u0 (map-get? user-balances tx-sender)))
-    (deposit-id (+ (var-get deposit-counter) u1))
-    (unlock-height (+ block-height lock-duration))
+    (current-portfolio (default-to u0 (map-get? investor-portfolios tx-sender)))
+    (vault-id (+ (var-get vault-sequence) u1))
+    (release-block (+ block-height lock-duration))
   )
-    (asserts! (not (var-get contract-paused)) ERR_UNAUTHORIZED)
-    (asserts! (>= current-balance amount) ERR_INSUFFICIENT_BALANCE)
-    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
-    (asserts! (>= lock-duration u144) ERR_INVALID_AMOUNT) ;; Minimum 1 day lock
+    (asserts! (var-get system-active) ERR_ACCESS_DENIED)
+    (asserts! (>= current-portfolio gold-amount) ERR_INSUFFICIENT_HOLDINGS)
+    (asserts! (> gold-amount u0) ERR_INVALID_QUANTITY)
+    (asserts! (>= lock-duration u1008) ERR_INVALID_QUANTITY) ;; Minimum 7 days lock
     
-    ;; Deduct from user balance
-    (map-set user-balances tx-sender (- current-balance amount))
+    ;; Deduct from investor portfolio
+    (map-set investor-portfolios tx-sender (- current-portfolio gold-amount))
     
-    ;; Create time-locked deposit
-    (map-set time-locked-deposits deposit-id {
-      owner: tx-sender,
-      amount: amount,
-      unlock-height: unlock-height,
-      created-at: block-height,
-      yield-claimed: false
+    ;; Create secured treasure vault
+    (map-set secured-treasure-vaults vault-id {
+      vault-keeper: tx-sender,
+      gold-quantity: gold-amount,
+      release-block: release-block,
+      vault-created: block-height,
+      premium-harvested: false
     })
     
-    ;; Update counter
-    (var-set deposit-counter deposit-id)
+    ;; Update sequence counter
+    (var-set vault-sequence vault-id)
     
     (print {
-      action: "create-time-locked-deposit",
-      deposit-id: deposit-id,
-      user: tx-sender,
-      amount: amount,
-      unlock-height: unlock-height
+      event: "seal-treasure-vault",
+      vault-id: vault-id,
+      keeper: tx-sender,
+      gold-amount: gold-amount,
+      release-block: release-block
     })
     
-    (ok deposit-id)
+    (ok vault-id)
   )
 )
 
-(define-public (unlock-time-locked-deposit (deposit-id uint))
+(define-public (open-treasure-vault (vault-id uint))
   (let (
-    (deposit-info (unwrap! (map-get? time-locked-deposits deposit-id) ERR_DEPOSIT_NOT_FOUND))
-    (current-balance (default-to u0 (map-get? user-balances tx-sender)))
+    (vault-details (unwrap! (map-get? secured-treasure-vaults vault-id) ERR_VAULT_NOT_FOUND))
+    (current-portfolio (default-to u0 (map-get? investor-portfolios tx-sender)))
   )
-    (asserts! (is-eq tx-sender (get owner deposit-info)) ERR_UNAUTHORIZED)
-    (asserts! (>= block-height (get unlock-height deposit-info)) ERR_TIME_LOCK_ACTIVE)
+    (asserts! (is-eq tx-sender (get vault-keeper vault-details)) ERR_ACCESS_DENIED)
+    (asserts! (>= block-height (get release-block vault-details)) ERR_VAULT_SEALED)
     
-    ;; Return funds to user balance
-    (map-set user-balances tx-sender (+ current-balance (get amount deposit-info)))
+    ;; Return gold to investor portfolio
+    (map-set investor-portfolios tx-sender (+ current-portfolio (get gold-quantity vault-details)))
     
-    ;; Remove the deposit record
-    (map-delete time-locked-deposits deposit-id)
+    ;; Remove the vault record
+    (map-delete secured-treasure-vaults vault-id)
     
     (print {
-      action: "unlock-time-locked-deposit",
-      deposit-id: deposit-id,
-      user: tx-sender,
-      amount: (get amount deposit-info)
+      event: "open-treasure-vault",
+      vault-id: vault-id,
+      keeper: tx-sender,
+      recovered-gold: (get gold-quantity vault-details)
     })
     
-    (ok (get amount deposit-info))
+    (ok (get gold-quantity vault-details))
   )
 )
 
-;; Yield Generation Functions
-(define-private (calculate-yield (principal-amount uint) (blocks-held uint))
+;; Premium Staking Rewards Functions
+(define-private (compute-staking-rewards (principal-gold uint) (blocks-staked uint))
   (let (
-    (annual-blocks u52560) ;; Approximate blocks per year (10 min avg)
-    (yield-rate (var-get base-yield-rate))
+    (annual-blocks u52560) ;; Approximate blocks per year
+    (premium-rate (var-get premium-staking-rate))
   )
-    ;; yield = (principal * rate * blocks_held) / (annual_blocks * 10000)
-    (/ (* (* principal-amount yield-rate) blocks-held) (* annual-blocks u10000))
+    ;; rewards = (principal * rate * blocks_staked) / (annual_blocks * 10000)
+    (/ (* (* principal-gold premium-rate) blocks-staked) (* annual-blocks u10000))
   )
 )
 
-(define-public (claim-yield)
+(define-public (harvest-staking-rewards)
   (let (
-    (user-balance (default-to u0 (map-get? user-balances tx-sender)))
-    (yield-info (default-to 
-      {last-claim-height: block-height, total-earned: u0, pending-yield: u0}
-      (map-get? user-yield-info tx-sender)
+    (investor-portfolio (default-to u0 (map-get? investor-portfolios tx-sender)))
+    (premium-data (default-to 
+      {last-harvest-block: block-height, lifetime-earnings: u0, accumulated-rewards: u0}
+      (map-get? investor-premium-tracking tx-sender)
     ))
-    (blocks-since-claim (- block-height (get last-claim-height yield-info)))
-    (earned-yield (calculate-yield user-balance blocks-since-claim))
+    (blocks-since-harvest (- block-height (get last-harvest-block premium-data)))
+    (earned-premium (compute-staking-rewards investor-portfolio blocks-since-harvest))
   )
-    (asserts! (> user-balance u0) ERR_INSUFFICIENT_BALANCE)
-    (asserts! (> blocks-since-claim u144) ERR_INVALID_AMOUNT) ;; Minimum 1 day between claims
+    (asserts! (> investor-portfolio u0) ERR_INSUFFICIENT_HOLDINGS)
+    (asserts! (> blocks-since-harvest u1008) ERR_INVALID_QUANTITY) ;; Minimum 7 days between harvests
     
-    ;; Update user balance with yield
-    (map-set user-balances tx-sender (+ user-balance earned-yield))
+    ;; Update investor portfolio with premium rewards
+    (map-set investor-portfolios tx-sender (+ investor-portfolio earned-premium))
     
-    ;; Update yield tracking
-    (map-set user-yield-info tx-sender {
-      last-claim-height: block-height,
-      total-earned: (+ (get total-earned yield-info) earned-yield),
-      pending-yield: u0
+    ;; Update premium tracking
+    (map-set investor-premium-tracking tx-sender {
+      last-harvest-block: block-height,
+      lifetime-earnings: (+ (get lifetime-earnings premium-data) earned-premium),
+      accumulated-rewards: u0
     })
     
-    ;; Update total wrapped BTC (yield increases total supply)
-    (var-set total-wrapped-btc (+ (var-get total-wrapped-btc) earned-yield))
+    ;; Update total tokenized gold (premium increases supply)
+    (var-set total-tokenized-gold (+ (var-get total-tokenized-gold) earned-premium))
     
     (print {
-      action: "claim-yield",
-      user: tx-sender,
-      yield-earned: earned-yield,
-      blocks-held: blocks-since-claim
+      event: "harvest-staking-rewards",
+      investor: tx-sender,
+      premium-earned: earned-premium,
+      blocks-staked: blocks-since-harvest
     })
     
-    (ok earned-yield)
+    (ok earned-premium)
   )
 )
 
-(define-public (claim-time-locked-yield (deposit-id uint))
+(define-public (harvest-vault-premium-bonus (vault-id uint))
   (let (
-    (deposit-info (unwrap! (map-get? time-locked-deposits deposit-id) ERR_DEPOSIT_NOT_FOUND))
-    (blocks-locked (- block-height (get created-at deposit-info)))
-    (bonus-multiplier u150) ;; 50% bonus for time-locked deposits
-    (base-yield (calculate-yield (get amount deposit-info) blocks-locked))
-    (bonus-yield (/ (* base-yield bonus-multiplier) u100))
-    (total-yield (+ base-yield bonus-yield))
-    (current-balance (default-to u0 (map-get? user-balances tx-sender)))
+    (vault-details (unwrap! (map-get? secured-treasure-vaults vault-id) ERR_VAULT_NOT_FOUND))
+    (blocks-vaulted (- block-height (get vault-created vault-details)))
+    (bonus-multiplier u200) ;; 100% bonus for vaulted gold
+    (base-premium (compute-staking-rewards (get gold-quantity vault-details) blocks-vaulted))
+    (bonus-premium (/ (* base-premium bonus-multiplier) u100))
+    (total-premium (+ base-premium bonus-premium))
+    (current-portfolio (default-to u0 (map-get? investor-portfolios tx-sender)))
   )
-    (asserts! (is-eq tx-sender (get owner deposit-info)) ERR_UNAUTHORIZED)
-    (asserts! (not (get yield-claimed deposit-info)) ERR_YIELD_ALREADY_CLAIMED)
-    (asserts! (>= block-height (get unlock-height deposit-info)) ERR_TIME_LOCK_ACTIVE)
+    (asserts! (is-eq tx-sender (get vault-keeper vault-details)) ERR_ACCESS_DENIED)
+    (asserts! (not (get premium-harvested vault-details)) ERR_REWARDS_ALREADY_HARVESTED)
+    (asserts! (>= block-height (get release-block vault-details)) ERR_VAULT_SEALED)
     
-    ;; Add yield to user balance
-    (map-set user-balances tx-sender (+ current-balance total-yield))
+    ;; Add premium to investor portfolio
+    (map-set investor-portfolios tx-sender (+ current-portfolio total-premium))
     
-    ;; Mark yield as claimed
-    (map-set time-locked-deposits deposit-id 
-      (merge deposit-info {yield-claimed: true})
+    ;; Mark premium as harvested
+    (map-set secured-treasure-vaults vault-id 
+      (merge vault-details {premium-harvested: true})
     )
     
-    ;; Update total wrapped BTC
-    (var-set total-wrapped-btc (+ (var-get total-wrapped-btc) total-yield))
+    ;; Update total tokenized gold
+    (var-set total-tokenized-gold (+ (var-get total-tokenized-gold) total-premium))
     
     (print {
-      action: "claim-time-locked-yield",
-      deposit-id: deposit-id,
-      user: tx-sender,
-      base-yield: base-yield,
-      bonus-yield: bonus-yield,
-      total-yield: total-yield
+      event: "harvest-vault-premium-bonus",
+      vault-id: vault-id,
+      investor: tx-sender,
+      base-premium: base-premium,
+      bonus-premium: bonus-premium,
+      total-premium: total-premium
     })
     
-    (ok total-yield)
+    (ok total-premium)
   )
 )
 
-;; Multi-Signature Unwrapping Functions
-(define-public (request-unwrap (amount uint) (btc-address (string-ascii 64)))
+;; Multi-Guardian Redemption Functions
+(define-public (initiate-redemption-order (gold-amount uint) (delivery-address (string-ascii 128)))
   (let (
-    (current-balance (default-to u0 (map-get? user-balances tx-sender)))
-    (request-id (+ (var-get unwrap-request-counter) u1))
+    (current-portfolio (default-to u0 (map-get? investor-portfolios tx-sender)))
+    (order-id (+ (var-get redemption-sequence) u1))
   )
-    (asserts! (not (var-get contract-paused)) ERR_UNAUTHORIZED)
-    (asserts! (>= current-balance amount) ERR_INSUFFICIENT_BALANCE)
-    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (var-get system-active) ERR_ACCESS_DENIED)
+    (asserts! (>= current-portfolio gold-amount) ERR_INSUFFICIENT_HOLDINGS)
+    (asserts! (> gold-amount u0) ERR_INVALID_QUANTITY)
     
-    ;; Deduct from user balance (escrowed until unwrap completes)
-    (map-set user-balances tx-sender (- current-balance amount))
+    ;; Deduct from investor portfolio (escrowed until redemption completes)
+    (map-set investor-portfolios tx-sender (- current-portfolio gold-amount))
     
-    ;; Create unwrap request
-    (map-set multisig-unwrap-requests request-id {
-      requester: tx-sender,
-      amount: amount,
-      btc-address: btc-address,
-      signatures: (list),
-      signature-count: u0,
-      executed: false,
-      created-at: block-height
+    ;; Create redemption order
+    (map-set guardian-redemption-orders order-id {
+      order-creator: tx-sender,
+      redemption-amount: gold-amount,
+      delivery-address: delivery-address,
+      guardian-approvals: (list),
+      approval-tally: u0,
+      order-fulfilled: false,
+      order-timestamp: block-height
     })
     
-    ;; Update counter
-    (var-set unwrap-request-counter request-id)
+    ;; Update sequence counter
+    (var-set redemption-sequence order-id)
     
     (print {
-      action: "request-unwrap",
-      request-id: request-id,
-      user: tx-sender,
-      amount: amount,
-      btc-address: btc-address
+      event: "initiate-redemption-order",
+      order-id: order-id,
+      creator: tx-sender,
+      gold-amount: gold-amount,
+      delivery-address: delivery-address
     })
     
-    (ok request-id)
+    (ok order-id)
   )
 )
 
-(define-public (sign-unwrap-request (request-id uint))
+(define-public (approve-redemption-order (order-id uint))
   (let (
-    (request-info (unwrap! (map-get? multisig-unwrap-requests request-id) ERR_DEPOSIT_NOT_FOUND))
-    (current-signatures (get signatures request-info))
-    (signature-count (get signature-count request-info))
+    (order-details (unwrap! (map-get? guardian-redemption-orders order-id) ERR_VAULT_NOT_FOUND))
+    (current-approvals (get guardian-approvals order-details))
+    (approval-count (get approval-tally order-details))
   )
-    (asserts! (is-authorized-signer tx-sender) ERR_UNAUTHORIZED)
-    (asserts! (not (get executed request-info)) ERR_UNAUTHORIZED)
+    (asserts! (is-certified-guardian tx-sender) ERR_ACCESS_DENIED)
+    (asserts! (not (get order-fulfilled order-details)) ERR_ACCESS_DENIED)
     
-    ;; Check if already signed
-    (asserts! (is-none (index-of current-signatures tx-sender)) ERR_ALREADY_SIGNED)
+    ;; Check if guardian already approved
+    (asserts! (is-none (index-of current-approvals tx-sender)) ERR_DUPLICATE_APPROVAL)
     
-    ;; Add signature
+    ;; Add guardian approval
     (let (
-      (new-signatures (unwrap! (as-max-len? (append current-signatures tx-sender) u10) ERR_INVALID_SIGNATURE))
-      (new-signature-count (+ signature-count u1))
+      (new-approvals (unwrap! (as-max-len? (append current-approvals tx-sender) u15) ERR_INVALID_GUARDIAN))
+      (new-approval-count (+ approval-count u1))
     )
-      (map-set multisig-unwrap-requests request-id
-        (merge request-info {
-          signatures: new-signatures,
-          signature-count: new-signature-count
+      (map-set guardian-redemption-orders order-id
+        (merge order-details {
+          guardian-approvals: new-approvals,
+          approval-tally: new-approval-count
         })
       )
       
       (print {
-        action: "sign-unwrap-request",
-        request-id: request-id,
-        signer: tx-sender,
-        signature-count: new-signature-count,
-        required: (var-get required-signatures)
+        event: "approve-redemption-order",
+        order-id: order-id,
+        guardian: tx-sender,
+        approval-count: new-approval-count,
+        required-approvals: (var-get minimum-guardian-approvals)
       })
       
-      (ok new-signature-count)
+      (ok new-approval-count)
     )
   )
 )
 
-(define-public (execute-unwrap (request-id uint))
+(define-public (fulfill-redemption-order (order-id uint))
   (let (
-    (request-info (unwrap! (map-get? multisig-unwrap-requests request-id) ERR_DEPOSIT_NOT_FOUND))
+    (order-details (unwrap! (map-get? guardian-redemption-orders order-id) ERR_VAULT_NOT_FOUND))
   )
-    (asserts! (is-authorized-signer tx-sender) ERR_UNAUTHORIZED)
-    (asserts! (not (get executed request-info)) ERR_UNAUTHORIZED)
-    (asserts! (>= (get signature-count request-info) (var-get required-signatures)) ERR_INSUFFICIENT_SIGNATURES)
+    (asserts! (is-certified-guardian tx-sender) ERR_ACCESS_DENIED)
+    (asserts! (not (get order-fulfilled order-details)) ERR_ACCESS_DENIED)
+    (asserts! (>= (get approval-tally order-details) (var-get minimum-guardian-approvals)) ERR_INSUFFICIENT_APPROVALS)
     
-    ;; Mark as executed
-    (map-set multisig-unwrap-requests request-id
-      (merge request-info {executed: true})
+    ;; Mark order as fulfilled
+    (map-set guardian-redemption-orders order-id
+      (merge order-details {order-fulfilled: true})
     )
     
-    ;; Update total wrapped BTC
-    (var-set total-wrapped-btc (- (var-get total-wrapped-btc) (get amount request-info)))
+    ;; Update total tokenized gold
+    (var-set total-tokenized-gold (- (var-get total-tokenized-gold) (get redemption-amount order-details)))
     
     (print {
-      action: "execute-unwrap",
-      request-id: request-id,
-      requester: (get requester request-info),
-      amount: (get amount request-info),
-      btc-address: (get btc-address request-info),
-      executor: tx-sender
+      event: "fulfill-redemption-order",
+      order-id: order-id,
+      order-creator: (get order-creator order-details),
+      gold-amount: (get redemption-amount order-details),
+      delivery-address: (get delivery-address order-details),
+      fulfilling-guardian: tx-sender
     })
     
-    (ok (get amount request-info))
-  )
-)
-
-;; Transfer Functions
-(define-public (transfer (amount uint) (recipient principal))
-  (let (
-    (sender-balance (default-to u0 (map-get? user-balances tx-sender)))
-    (recipient-balance (default-to u0 (map-get? user-balances recipient)))
-  )
-    (asserts! (not (var-get contract-paused)) ERR_UNAUTHORIZED)
-    (asserts! (>= sender-balance amount) ERR_INSUFFICIENT_BALANCE)
-    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
-    (asserts! (not (is-eq tx-sender recipient)) ERR_INVALID_AMOUNT)
-    
-    ;; Update balances
-    (map-set user-balances tx-sender (- sender-balance amount))
-    (map-set user-balances recipient (+ recipient-balance amount))
-    
-    (print {
-      action: "transfer",
-      from: tx-sender,
-      to: recipient,
-      amount: amount
-    })
-    
-    (ok amount)
+    (ok (get redemption-amount order-details))
   )
 )
 
 ;; View Functions
-(define-read-only (get-user-balance (user principal))
-  (default-to u0 (map-get? user-balances user))
+(define-read-only (get-investor-portfolio (investor principal))
+  (default-to u0 (map-get? investor-portfolios investor))
 )
 
-(define-read-only (get-total-wrapped-btc)
-  (var-get total-wrapped-btc)
+(define-read-only (get-total-tokenized-gold)
+  (var-get total-tokenized-gold)
 )
 
-(define-read-only (get-time-locked-deposit (deposit-id uint))
-  (map-get? time-locked-deposits deposit-id)
+(define-read-only (get-treasure-vault-details (vault-id uint))
+  (map-get? secured-treasure-vaults vault-id)
 )
 
-(define-read-only (get-unwrap-request (request-id uint))
-  (map-get? multisig-unwrap-requests request-id)
+(define-read-only (get-redemption-order-details (order-id uint))
+  (map-get? guardian-redemption-orders order-id)
 )
 
-(define-read-only (get-user-yield-info (user principal))
-  (map-get? user-yield-info user)
+(define-read-only (get-investor-premium-data (investor principal))
+  (map-get? investor-premium-tracking investor)
 )
 
-(define-read-only (calculate-pending-yield (user principal))
+(define-read-only (calculate-pending-premium (investor principal))
   (let (
-    (user-balance (default-to u0 (map-get? user-balances user)))
-    (yield-info (default-to 
-      {last-claim-height: block-height, total-earned: u0, pending-yield: u0}
-      (map-get? user-yield-info user)
+    (investor-portfolio (default-to u0 (map-get? investor-portfolios investor)))
+    (premium-data (default-to 
+      {last-harvest-block: block-height, lifetime-earnings: u0, accumulated-rewards: u0}
+      (map-get? investor-premium-tracking investor)
     ))
-    (blocks-since-claim (- block-height (get last-claim-height yield-info)))
+    (blocks-since-harvest (- block-height (get last-harvest-block premium-data)))
   )
-    (calculate-yield user-balance blocks-since-claim)
+    (compute-staking-rewards investor-portfolio blocks-since-harvest)
   )
 )
 
-(define-read-only (get-contract-info)
+(define-read-only (get-vault-system-status)
   {
-    total-wrapped-btc: (var-get total-wrapped-btc),
-    base-yield-rate: (var-get base-yield-rate),
-    required-signatures: (var-get required-signatures),
-    contract-paused: (var-get contract-paused),
-    deposit-counter: (var-get deposit-counter),
-    unwrap-request-counter: (var-get unwrap-request-counter)
+    total-tokenized-gold: (var-get total-tokenized-gold),
+    premium-staking-rate: (var-get premium-staking-rate),
+    minimum-guardian-approvals: (var-get minimum-guardian-approvals),
+    system-active: (var-get system-active),
+    vault-sequence: (var-get vault-sequence),
+    redemption-sequence: (var-get redemption-sequence)
   }
-)
-
-(define-read-only (is-authorized-signer-check (signer principal))
-  (is-authorized-signer signer)
-)
-
-(define-read-only (is-contract-paused)
-  (var-get contract-paused)
 )
